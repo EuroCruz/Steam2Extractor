@@ -1,5 +1,7 @@
 # Steam2 Extractor
 
+English | [Русский](README.ru.md)
+
 Extracts Steam2 depot content from .dat/.blob/.sim/.sid
 
 ## Build
