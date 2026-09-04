@@ -33,9 +33,6 @@ extract donate    show donation addresses
 ```
 
 ## Donate
-
-| | |
-|---|---|
 | Bitcoin | `bc1q2e60ws5yy6m5czv5wtc97z28vp8et3quvzx35c` |
 | Solana | `HgqXV2YMWQggDJNDWzJ3rrczwhhy9AAUq7xZcziBqHbC` |
 | ETH/Base/BNB | `0xff7b4d8be072dd36eb221c64cdc6ba48cce83b7e` |
