@@ -1,0 +1,13 @@
+[package]
+name = "extract"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "extractcore"
+path = "src/lib.rs"
+
+[dependencies]
+
+[profile.dev]
+opt-level = 1
