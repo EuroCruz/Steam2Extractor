@@ -1,6 +1,6 @@
 # Steam2 Extractor
 
-Extracts Steam2 depot content from .dat/.blob/.sim/.sid.
+Extracts Steam2 depot content from .dat/.blob/.sim/.sid
 
 ## Build
 
