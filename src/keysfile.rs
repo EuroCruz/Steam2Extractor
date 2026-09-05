@@ -24,7 +24,7 @@ mod tests {
     #[test]
     fn parses_vdf_style_lines() {
         assert_eq!(
-            parse_line("\t\t\"201701\"\t\t\"f0ed49ba492fbb4d7bf288f24150fa2b\""),
+            parse_line("\t\t\"480\"\t\t\"49684128b36ed12d85bc17e8bbbf6b22\""),
             Some((
                 201701,
                 [
