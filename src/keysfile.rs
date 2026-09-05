@@ -24,12 +24,12 @@ mod tests {
     #[test]
     fn parses_vdf_style_lines() {
         assert_eq!(
-            parse_line("\t\t\"480\"\t\t\"49684128b36ed12d85bc17e8bbbf6b22\""),
+            parse_line("\t\t\"481\"\t\t\"49684128b36ed12d85bc17e8bbbf6b22\""),
             Some((
-                201701,
+                481,
                 [
-                    0xf0, 0xed, 0x49, 0xba, 0x49, 0x2f, 0xbb, 0x4d, 0x7b, 0xf2, 0x88, 0xf2, 0x41,
-                    0x50, 0xfa, 0x2b
+                    0x49, 0x68, 0x41, 0x28, 0xb3, 0x6e, 0xd1, 0x2d, 0x85, 0xbc, 0x17, 0xe8, 0xbb,
+                    0xbf, 0x6b, 0x22
                 ]
             ))
         );
