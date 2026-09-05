@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::bail;
 use crate::blob::{Blob, decompress_blob, rb32, value_u32, value_u64};
 use crate::chunk::handle_chunk;
 use crate::cli::Args;
+use crate::cp1252;
 use crate::error::{Error, Result};
 use crate::filter::Filter;
 use crate::manifest::{CompressionType, Manifest};
@@ -107,6 +108,9 @@ fn parse_out_checksum_info(
         filecount: u32,
         offset: u32,
     }
+    if num_fileblocks as usize > csum.len() / 16 {
+        bail!("parse_out_checksum_info: implausible fileblock count");
+    }
     let mut table = Vec::with_capacity(num_fileblocks as usize);
     for _ in 0..num_fileblocks {
         let fileid_start = r.read_u32()?;
@@ -148,6 +152,9 @@ fn parse_out_checksum_info(
             }
             max_blocks_actual = max_blocks_actual.max(numblocks);
 
+            if numblocks as usize > csum.len() / 8 {
+                bail!("parse_out_checksum_info: implausible block count");
+            }
             let mut checksums = Vec::with_capacity(numblocks as usize);
             for _ in 0..numblocks {
                 let compressed_size = r.read_u32()?;
@@ -322,11 +329,6 @@ fn find_wanted_files_smart(
     })
 }
 
-fn sanitize_path(p: &Path) -> PathBuf {
-    let s = p.to_string_lossy().replace(':', "");
-    PathBuf::from(s)
-}
-
 pub fn run(args: &Args) -> Result<()> {
     let filter = Filter::new(&args.filter)?;
 
@@ -390,11 +392,12 @@ pub fn run(args: &Args) -> Result<()> {
     };
 
     for entry in &manifest.nodes {
-        let rel_path = manifest
+        let raw_rel_path = manifest
             .id_to_path
             .get(&entry.file_id)
             .cloned()
             .unwrap_or_default();
+        let rel_path = cp1252::sanitize_path(&raw_rel_path);
 
         if !filter.matches(&rel_path) {
             continue;
@@ -404,9 +407,9 @@ pub fn run(args: &Args) -> Result<()> {
         }
 
         let final_path = base.join(&rel_path);
-        let mut final_dir = final_path.clone();
-        final_dir.pop();
-        fs::create_dir_all(sanitize_path(&final_dir))?;
+        if let Some(parent) = final_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         let mut out_file = fs::File::create(&final_path)?;
 
         let info = fileids.get(&entry.file_id).cloned().unwrap_or_default();
@@ -420,6 +423,9 @@ pub fn run(args: &Args) -> Result<()> {
         for block in &info.checksums {
             if block.compressed_size == 0 {
                 continue;
+            }
+            if block.compressed_size > 0x10000 {
+                bail!("extract: implausible compressed block size");
             }
             let dat_file = dat_files
                 .get_mut(&info.part)

@@ -1,5 +1,6 @@
 pub mod adler32;
 pub mod aes;
+pub mod argflags;
 pub mod blob;
 pub mod chunk;
 pub mod cli;

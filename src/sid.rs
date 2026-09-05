@@ -9,6 +9,7 @@ use crate::crc32::crc32;
 use crate::error::{Error, Result};
 use crate::filter::Filter;
 use crate::inflate::raw_inflate;
+use crate::reader::{cstr_at, read_u32_at as read_u32, read_u64_at as read_u64};
 use crate::sidcli::SidArgs;
 
 const SIM_MAGIC: u32 = 0x3fd0_4c1f;
@@ -30,25 +31,6 @@ struct SimRow {
 struct SimFile {
     string_table: Vec<u8>,
     rows: Vec<SimRow>,
-}
-
-fn read_u32(b: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
-}
-
-fn read_u64(b: &[u8], off: usize) -> u64 {
-    u64::from_le_bytes(b[off..off + 8].try_into().unwrap())
-}
-
-fn cstr_at(table: &[u8], off: usize) -> Result<&[u8]> {
-    let bytes = table
-        .get(off..)
-        .ok_or_else(|| Error::new("sim: string offset out of bounds"))?;
-    let end = bytes
-        .iter()
-        .position(|&b| b == 0)
-        .ok_or_else(|| Error::new("sim: unterminated string"))?;
-    Ok(&bytes[..end])
 }
 
 impl SimFile {
@@ -263,7 +245,7 @@ fn parse_pk_header(data: &[u8]) -> Result<PkLocalHeader> {
 }
 
 fn extract_entry(stream: &mut SidStream, row: &SimRow, key: &[u8; 16]) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(row.file_size as usize);
+    let mut out = Vec::with_capacity((row.file_size as usize).min(1 << 20));
     let mut next_offset = row.data_offset;
     stream.ensure_open(row.disk_no, row.disk_file_no as usize)?;
 
@@ -310,7 +292,7 @@ fn extract_entry(stream: &mut SidStream, row: &SimRow, key: &[u8; 16]) -> Result
             let pk = parse_pk_header(real)?;
             let deflated = &real[pk.header_len..];
             let remaining = (row.file_size - out.len() as u64) as usize;
-            let inflated = raw_inflate(deflated, remaining.min(1 << 20))?;
+            let inflated = raw_inflate(deflated, remaining)?;
             if crc32(0, &inflated) != pk.crc32 {
                 bail!("sid: CRC32 mismatch while decompressing block");
             }

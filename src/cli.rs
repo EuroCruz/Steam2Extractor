@@ -1,3 +1,4 @@
+use crate::argflags::parse_common_flag;
 use crate::bail;
 use crate::error::Result;
 use crate::keysource::KeySource;
@@ -30,12 +31,13 @@ pub fn parse(argv: &[String]) -> Result<Args> {
     let mut i = 0;
     while i < argv.len() {
         let arg = &argv[i];
+        if parse_common_flag(arg, argv, &mut i, &mut keys, &mut filter, &mut out)? {
+            continue;
+        }
         let slot = match arg.as_str() {
             "--blob-dir" => Some(&mut blob_dir),
             "--dat-dir" => Some(&mut dat_dir),
             "--blobcrc" => Some(&mut blobcrc),
-            "--filter" => Some(&mut filter),
-            "--out" => Some(&mut out),
             _ => None,
         };
         if let Some(slot) = slot {
@@ -44,20 +46,6 @@ pub fn parse(argv: &[String]) -> Result<Args> {
                 .get(i)
                 .ok_or_else(|| crate::error::Error::new(format!("missing value for {arg}")))?;
             *slot = Some(value.clone());
-            i += 1;
-        } else if arg == "--key" {
-            i += 1;
-            let value = argv
-                .get(i)
-                .ok_or_else(|| crate::error::Error::new("missing value for --key"))?;
-            keys.add(value)?;
-            i += 1;
-        } else if arg == "--keys-file" {
-            i += 1;
-            let value = argv
-                .get(i)
-                .ok_or_else(|| crate::error::Error::new("missing value for --keys-file"))?;
-            keys.add_file(value)?;
             i += 1;
         } else if arg == "--offline" {
             offline = true;

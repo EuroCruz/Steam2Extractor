@@ -65,6 +65,8 @@ pub fn value_u64(v: &[u8]) -> Result<u64> {
     Ok(u64::from_le_bytes(v.try_into().unwrap()))
 }
 
+const MAX_UNPACKED_SIZE: usize = 512 * 1024 * 1024;
+
 pub fn decompress_blob(data: &[u8]) -> Result<Vec<u8>> {
     if data.len() < 20 {
         bail!("blob: compressed blob too small");
@@ -74,11 +76,24 @@ pub fn decompress_blob(data: &[u8]) -> Result<Vec<u8>> {
         bail!("blob: bad magic in compressed blob");
     }
     let unpacked_size = u64::from_le_bytes(data[10..18].try_into().unwrap()) as usize;
-    let out = zlib_decompress(&data[20..], unpacked_size)?;
-    if out.len() > unpacked_size {
-        bail!("blob: compressed blob failed to decompress");
+    if unpacked_size > MAX_UNPACKED_SIZE {
+        bail!("blob: implausible unpacked size");
     }
+    let out = zlib_decompress(&data[20..], unpacked_size)?;
     let mut buf = vec![0u8; unpacked_size];
     buf[..out.len()].copy_from_slice(&out);
     Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_implausible_unpacked_size() {
+        let mut data = vec![0u8; 20];
+        data[0..2].copy_from_slice(&0x4301u16.to_le_bytes());
+        data[10..18].copy_from_slice(&(MAX_UNPACKED_SIZE as u64 + 1).to_le_bytes());
+        assert!(decompress_blob(&data).is_err());
+    }
 }

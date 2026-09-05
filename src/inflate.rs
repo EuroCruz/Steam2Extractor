@@ -187,15 +187,21 @@ fn dynamic_tables(br: &mut BitReader) -> Result<(HuffTable, HuffTable)> {
     Ok((lit_table, dist_table))
 }
 
+const PREALLOC_CAP: usize = 1 << 20;
+
 fn inflate_block(
     br: &mut BitReader,
     lit_table: &HuffTable,
     dist_table: &HuffTable,
     out: &mut Vec<u8>,
+    max_size: usize,
 ) -> Result<()> {
     loop {
         let sym = lit_table.decode(br)?;
         if sym < 256 {
+            if out.len() >= max_size {
+                bail!("inflate: output exceeds expected size");
+            }
             out.push(sym as u8);
         } else if sym == 256 {
             return Ok(());
@@ -215,6 +221,9 @@ fn inflate_block(
             if distance > out.len() {
                 bail!("inflate: distance too far back");
             }
+            if out.len() + length > max_size {
+                bail!("inflate: output exceeds expected size");
+            }
             let start = out.len() - distance;
             for i in 0..length {
                 let byte = out[start + i];
@@ -224,7 +233,7 @@ fn inflate_block(
     }
 }
 
-fn inflate_stream(br: &mut BitReader, out: &mut Vec<u8>) -> Result<()> {
+fn inflate_stream(br: &mut BitReader, out: &mut Vec<u8>, max_size: usize) -> Result<()> {
     loop {
         let bfinal = br.read_bits(1)?;
         let btype = br.read_bits(2)?;
@@ -240,17 +249,20 @@ fn inflate_stream(br: &mut BitReader, out: &mut Vec<u8>) -> Result<()> {
                 if len != !nlen {
                     bail!("inflate: stored block length mismatch");
                 }
+                if out.len() + len as usize > max_size {
+                    bail!("inflate: output exceeds expected size");
+                }
                 for _ in 0..len {
                     out.push(br.read_u8()?);
                 }
             }
             1 => {
                 let (lit_table, dist_table) = fixed_tables();
-                inflate_block(br, &lit_table, &dist_table, out)?;
+                inflate_block(br, &lit_table, &dist_table, out, max_size)?;
             }
             2 => {
                 let (lit_table, dist_table) = dynamic_tables(br)?;
-                inflate_block(br, &lit_table, &dist_table, out)?;
+                inflate_block(br, &lit_table, &dist_table, out, max_size)?;
             }
             _ => bail!("inflate: invalid block type"),
         }
@@ -260,14 +272,14 @@ fn inflate_stream(br: &mut BitReader, out: &mut Vec<u8>) -> Result<()> {
     }
 }
 
-pub fn raw_inflate(data: &[u8], size_hint: usize) -> Result<Vec<u8>> {
+pub fn raw_inflate(data: &[u8], max_size: usize) -> Result<Vec<u8>> {
     let mut br = BitReader::new(data);
-    let mut out = Vec::with_capacity(size_hint);
-    inflate_stream(&mut br, &mut out)?;
+    let mut out = Vec::with_capacity(max_size.min(PREALLOC_CAP));
+    inflate_stream(&mut br, &mut out, max_size)?;
     Ok(out)
 }
 
-pub fn zlib_decompress(data: &[u8], size_hint: usize) -> Result<Vec<u8>> {
+pub fn zlib_decompress(data: &[u8], max_size: usize) -> Result<Vec<u8>> {
     if data.len() < 6 {
         bail!("inflate: zlib stream too short");
     }
@@ -284,8 +296,8 @@ pub fn zlib_decompress(data: &[u8], size_hint: usize) -> Result<Vec<u8>> {
     }
 
     let mut br = BitReader::new(&data[2..]);
-    let mut out = Vec::with_capacity(size_hint);
-    inflate_stream(&mut br, &mut out)?;
+    let mut out = Vec::with_capacity(max_size.min(PREALLOC_CAP));
+    inflate_stream(&mut br, &mut out, max_size)?;
 
     let trailer_start = 2 + br.trailer_offset();
     if data.len() < trailer_start + 4 {
@@ -318,6 +330,14 @@ mod tests {
         zlib.extend_from_slice(&adler.to_be_bytes());
         let out = zlib_decompress(&zlib, 5).unwrap();
         assert_eq!(out, b"hello");
+    }
+
+    #[test]
+    fn rejects_output_over_max_size() {
+        let mut stored_block_len10 = vec![0x01u8, 0x0a, 0x00, 0xf5, 0xff];
+        stored_block_len10.extend_from_slice(&[0u8; 10]);
+        assert!(raw_inflate(&stored_block_len10, 5).is_err());
+        assert!(raw_inflate(&stored_block_len10, 10).is_ok());
     }
 
     #[test]

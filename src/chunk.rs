@@ -14,13 +14,7 @@ pub fn handle_chunk(data: &[u8], cmptype: CompressionType, key: &[u8; 16]) -> Re
 
     match cmptype {
         CompressionType::Uncompressed => Ok(data.to_vec()),
-        CompressionType::Compressed => {
-            let out = zlib_decompress(data, 0x8000)?;
-            if out.len() > 0x8000 {
-                bail!("handle_chunk: decompressed chunk too large");
-            }
-            Ok(out)
-        }
+        CompressionType::Compressed => zlib_decompress(data, 0x8000),
         CompressionType::CompressedAndEncrypted => {
             if data.len() < 8 {
                 bail!("handle_chunk: chunk too small for header (filemode 3)");
@@ -31,11 +25,7 @@ pub fn handle_chunk(data: &[u8], cmptype: CompressionType, key: &[u8; 16]) -> Re
             }
             let mut payload = data[8..].to_vec();
             cfb_decrypt(key, &mut payload);
-            let out = zlib_decompress(&payload, decompressed_size)?;
-            if out.len() > decompressed_size {
-                bail!("handle_chunk: decompression failed (filemode 3)");
-            }
-            Ok(out)
+            zlib_decompress(&payload, decompressed_size)
         }
         CompressionType::Encrypted => {
             let mut payload = data.to_vec();

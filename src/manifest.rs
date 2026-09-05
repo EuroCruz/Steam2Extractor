@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use crate::adler32::adler32;
 use crate::bail;
+use crate::cp1252;
 use crate::error::Result;
+use crate::reader::{cstr_at, read_u32_at as read_u32};
 
 const HEADER_SIZE: usize = 0x38;
 const NODE_SIZE: usize = 0x1c;
@@ -25,15 +27,6 @@ pub struct Manifest {
     pub header: Header,
     pub nodes: Vec<DirNode>,
     pub id_to_path: HashMap<u32, String>,
-}
-
-fn read_u32(data: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes(data[off..off + 4].try_into().unwrap())
-}
-
-fn cstr_at(data: &[u8], off: usize) -> String {
-    let end = data[off..].iter().position(|&b| b == 0).unwrap_or(0);
-    String::from_utf8_lossy(&data[off..off + end]).into_owned()
 }
 
 impl Manifest {
@@ -86,14 +79,24 @@ impl Manifest {
         for node in &nodes {
             let mut path = String::new();
             let mut current = *node;
+            let mut hops = 0usize;
             while current.parent != 0xffffffff {
-                let name = cstr_at(data, string_table + current.name_offset as usize);
+                hops += 1;
+                if hops > nodes.len() {
+                    bail!("manifest: cyclic node parent chain");
+                }
+                let name_bytes = cstr_at(data, string_table + current.name_offset as usize)?;
+                let name = cp1252::decode_string(name_bytes);
                 if current.parent != 0 {
                     path = format!("/{}{}", name, path);
                 } else {
                     path = format!("{}{}", name, path);
                 }
-                current = nodes[current.parent as usize];
+                let parent_idx = current.parent as usize;
+                if parent_idx >= nodes.len() {
+                    bail!("manifest: node parent index out of bounds");
+                }
+                current = nodes[parent_idx];
             }
             id_to_path.insert(node.file_id, path);
         }
@@ -168,5 +171,43 @@ mod tests {
         assert_eq!(manifest.header.ver_id, 5);
         assert_eq!(manifest.id_to_path[&1], "dirA");
         assert_eq!(manifest.id_to_path[&2], "dirA/fileX");
+    }
+
+    fn build_manifest(nodes: &[(u32, u32, u32, u32)], string_table_bytes: &[u8]) -> Vec<u8> {
+        let mut data = vec![0u8; HEADER_SIZE + NODE_SIZE * nodes.len() + string_table_bytes.len()];
+        data[0..4].copy_from_slice(&4u32.to_le_bytes());
+        data[12..16].copy_from_slice(&(nodes.len() as u32).to_le_bytes());
+        let len = data.len() as u32;
+        data[24..28].copy_from_slice(&len.to_le_bytes());
+
+        for (i, &(name_offset, file_id, flags, parent)) in nodes.iter().enumerate() {
+            let off = HEADER_SIZE + NODE_SIZE * i;
+            data[off..off + 4].copy_from_slice(&name_offset.to_le_bytes());
+            data[off + 8..off + 12].copy_from_slice(&file_id.to_le_bytes());
+            data[off + 12..off + 16].copy_from_slice(&flags.to_le_bytes());
+            data[off + 16..off + 20].copy_from_slice(&parent.to_le_bytes());
+        }
+
+        let string_table = HEADER_SIZE + NODE_SIZE * nodes.len();
+        data[string_table..string_table + string_table_bytes.len()]
+            .copy_from_slice(string_table_bytes);
+
+        let checksum = adler32(0, &data);
+        data[52..56].copy_from_slice(&checksum.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn rejects_cyclic_parent_chain() {
+        let nodes = [(0u32, 0u32, 1u32, 1u32), (0u32, 1u32, 1u32, 0u32)];
+        let data = build_manifest(&nodes, b"\0");
+        assert!(Manifest::parse(&data).is_err());
+    }
+
+    #[test]
+    fn rejects_out_of_bounds_parent() {
+        let nodes = [(0u32, 0u32, 1u32, 999u32)];
+        let data = build_manifest(&nodes, b"\0");
+        assert!(Manifest::parse(&data).is_err());
     }
 }

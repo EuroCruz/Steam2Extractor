@@ -1,5 +1,24 @@
 use crate::bail;
-use crate::error::Result;
+use crate::error::{Error, Result};
+
+pub fn read_u32_at(data: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes(data[off..off + 4].try_into().unwrap())
+}
+
+pub fn read_u64_at(data: &[u8], off: usize) -> u64 {
+    u64::from_le_bytes(data[off..off + 8].try_into().unwrap())
+}
+
+pub fn cstr_at(data: &[u8], off: usize) -> Result<&[u8]> {
+    let bytes = data
+        .get(off..)
+        .ok_or_else(|| Error::new("reader: string offset out of bounds"))?;
+    let end = bytes
+        .iter()
+        .position(|&b| b == 0)
+        .ok_or_else(|| Error::new("reader: unterminated string"))?;
+    Ok(&bytes[..end])
+}
 
 pub struct ByteReader<'a> {
     data: &'a [u8],
