@@ -2,7 +2,7 @@
 
 English | [Русский](README.ru.md)
 
-Extracts Steam2 depot content from .dat/.blob/.sim/.sid
+Extracts Steam2 / Steam DVD content from .dat .blob .sim .sid
 
 ## Build
 
