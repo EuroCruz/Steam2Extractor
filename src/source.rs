@@ -60,6 +60,10 @@ impl Source {
         Ok(names.into_iter().collect())
     }
 
+    pub fn exists_locally(&self, filename: &str) -> bool {
+        self.cache_dir.join(filename).exists()
+    }
+
     pub fn size(&self, filename: &str) -> Result<u64> {
         let local = self.cache_dir.join(filename);
         if let Ok(meta) = fs::metadata(&local) {

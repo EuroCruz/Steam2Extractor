@@ -196,6 +196,61 @@ struct WantedFiles {
     blobs: BTreeMap<i64, String>,
 }
 
+fn blob_dat_size(blob: &Blob) -> Option<u64> {
+    let format_code = value_u32(blob.get(&rb32(0))?).ok()?;
+    match format_code {
+        3 => value_u32(blob.get(&rb32(13))?).ok().map(u64::from),
+        4 => value_u64(blob.get(&rb32(13))?).ok(),
+        _ => None,
+    }
+}
+
+fn pick_consistent_pair(
+    blob_source: &Source,
+    dat_source: &Source,
+    blob_names: &[String],
+    dat_names: &[String],
+) -> Result<(String, String)> {
+    if blob_names.len() == 1 && dat_names.len() == 1 {
+        blob_source.resolve(&blob_names[0])?;
+        dat_source.resolve(&dat_names[0])?;
+        return Ok((blob_names[0].clone(), dat_names[0].clone()));
+    }
+
+    let mut ordered_blobs: Vec<&String> = blob_names.iter().collect();
+    ordered_blobs.sort_by_key(|n| !blob_source.exists_locally(n));
+    let mut ordered_dats: Vec<&String> = dat_names.iter().collect();
+    ordered_dats.sort_by_key(|n| !dat_source.exists_locally(n));
+
+    let mut last_err = None;
+    for blob_name in &ordered_blobs {
+        let path = match blob_source.resolve(blob_name) {
+            Ok(p) => p,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        };
+        let data = fs::read(&path)?;
+        let blob = Blob::parse(&data)?;
+        let Some(dat_size) = blob_dat_size(&blob) else {
+            continue;
+        };
+        for dat_name in &ordered_dats {
+            if dat_source.size(dat_name).ok() == Some(dat_size)
+                && dat_source.resolve(dat_name).is_ok()
+            {
+                return Ok(((*blob_name).clone(), (*dat_name).clone()));
+            }
+        }
+    }
+
+    bail!(
+        "find_wanted_files[naive]: no consistent blob/dat pair (depot was likely reset more than once); pass --blobcrc to pick one manually{}",
+        last_err.map(|e| format!(" ({e})")).unwrap_or_default()
+    )
+}
+
 fn find_wanted_files_naive(
     blob_source: &Source,
     dat_source: &Source,
@@ -203,36 +258,30 @@ fn find_wanted_files_naive(
     version: u32,
 ) -> Result<WantedFiles> {
     let prefix = format!("{}_", depot);
-    let mut wanted_blobs = BTreeMap::new();
+    let mut blob_candidates: BTreeMap<i64, Vec<String>> = BTreeMap::new();
     for filename in blob_source.list(depot, &prefix, ".blob")? {
         let (_depot, blobver) = parse_two_ints_prefix(&filename)?;
-        if wanted_blobs.contains_key(&blobver) {
-            bail!(
-                "find_wanted_files[naive]: more than one blob found, please pass --blobcrc to specify exactly which blob you want"
-            );
-        }
         if blobver <= version as i64 {
-            wanted_blobs.insert(blobver, filename);
+            blob_candidates.entry(blobver).or_default().push(filename);
         }
     }
-
-    let mut wanted_dats = BTreeMap::new();
+    let mut dat_candidates: BTreeMap<i64, Vec<String>> = BTreeMap::new();
     for filename in dat_source.list(depot, &prefix, ".dat")? {
         let (_depot, blobver) = parse_two_ints_prefix(&filename)?;
-        if wanted_dats.contains_key(&blobver) {
-            bail!(
-                "find_wanted_files[naive]: more than one dat found, please pass --blobcrc to specify exactly which blob you want"
-            );
-        }
         if blobver <= version as i64 {
-            wanted_dats.insert(blobver, filename);
+            dat_candidates.entry(blobver).or_default().push(filename);
         }
     }
 
+    let mut wanted_blobs = BTreeMap::new();
+    let mut wanted_dats = BTreeMap::new();
     for i in 0..=version as i64 {
-        if !wanted_dats.contains_key(&i) || !wanted_blobs.contains_key(&i) {
+        let (Some(blobs), Some(dats)) = (blob_candidates.get(&i), dat_candidates.get(&i)) else {
             bail!("find_wanted_files[naive]: missing a blob or a dat file!");
-        }
+        };
+        let (blob, dat) = pick_consistent_pair(blob_source, dat_source, blobs, dats)?;
+        wanted_blobs.insert(i, blob);
+        wanted_dats.insert(i, dat);
     }
 
     Ok(WantedFiles {

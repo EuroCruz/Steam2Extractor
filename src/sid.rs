@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -9,6 +10,7 @@ use crate::crc32::crc32;
 use crate::error::{Error, Result};
 use crate::filter::Filter;
 use crate::inflate::raw_inflate;
+use crate::keysource::KeySource;
 use crate::reader::{cstr_at, read_u32_at as read_u32, read_u64_at as read_u64};
 use crate::sidcli::SidArgs;
 
@@ -52,6 +54,9 @@ impl SimFile {
 
         let row_count = read_u32(data, str_table_end + 4) as usize;
         let rows_start = str_table_end + 8;
+        if row_count > data.len().saturating_sub(rows_start) / 32 {
+            bail!("sim: implausible row count");
+        }
         let mut rows = Vec::with_capacity(row_count);
         for i in 0..row_count {
             let off = rows_start + i * 32;
@@ -78,56 +83,83 @@ impl SimFile {
         let file_str =
             cp1252::decode_string(cstr_at(&self.string_table, row.file_str_off as usize)?);
         let mut path = PathBuf::from(row.depot.to_string());
-        let path_str = cp1252::sanitize_path(&path_str);
         if !path_str.is_empty() {
-            path.push(path_str);
+            path.push(cp1252::sanitize_path(&path_str));
         }
         path.push(cp1252::sanitize_path(&file_str));
         Ok(path)
     }
 }
 
-fn find_sid_files(sim_path: &Path) -> Result<Vec<PathBuf>> {
-    let dir = sim_path.parent().map(Path::to_path_buf).unwrap_or_default();
+fn set_slot(slots: &mut Vec<Option<PathBuf>>, idx: usize, path: PathBuf) {
+    if slots.len() <= idx {
+        slots.resize(idx + 1, None);
+    }
+    slots[idx] = Some(path);
+}
+
+fn find_sid_files(sim_path: &Path) -> Result<Vec<Option<PathBuf>>> {
+    let dir = match sim_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
     let stem = sim_path
         .file_stem()
         .ok_or_else(|| Error::new("sid: invalid .sim filename"))?
         .to_string_lossy()
         .into_owned();
+    let stem_lc = stem.to_lowercase();
 
-    let mut files = Vec::new();
-    let alt_first = dir.join(format!("{stem}.sid"));
-    if alt_first.exists() {
-        files.push(alt_first);
-        let mut idx = 2;
-        loop {
-            let candidate = dir.join(format!("{stem}{idx}.sid"));
-            if !candidate.exists() {
-                break;
+    let entries: Vec<(String, PathBuf)> = fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| (e.file_name().to_string_lossy().to_lowercase(), e.path()))
+        .collect();
+
+    let has_bare = entries
+        .iter()
+        .any(|(name, _)| *name == format!("{stem_lc}.sid"));
+
+    let mut slots: Vec<Option<PathBuf>> = Vec::new();
+    if has_bare {
+        for (name, path) in &entries {
+            let Some(rest) = name
+                .strip_prefix(&stem_lc)
+                .and_then(|r| r.strip_suffix(".sid"))
+            else {
+                continue;
+            };
+            let idx = if rest.is_empty() {
+                Some(0)
+            } else {
+                rest.parse::<usize>().ok().and_then(|n| n.checked_sub(1))
+            };
+            if let Some(idx) = idx {
+                set_slot(&mut slots, idx, path.clone());
             }
-            files.push(candidate);
-            idx += 1;
         }
     } else {
-        let mut idx = 0;
-        loop {
-            let candidate = dir.join(format!("{stem}_{idx}.sid"));
-            if !candidate.exists() {
-                break;
+        let prefix = format!("{stem_lc}_");
+        for (name, path) in &entries {
+            let Some(rest) = name.strip_prefix(&prefix).and_then(|r| r.strip_suffix(".sid"))
+            else {
+                continue;
+            };
+            if let Ok(idx) = rest.parse::<usize>() {
+                set_slot(&mut slots, idx, path.clone());
             }
-            files.push(candidate);
-            idx += 1;
         }
     }
 
-    if files.is_empty() {
+    if slots.iter().all(Option::is_none) {
         bail!("sid: no .sid files found next to {}", sim_path.display());
     }
-    Ok(files)
+    Ok(slots)
 }
 
 struct SidStream {
-    disks: Vec<Vec<PathBuf>>,
+    disks: Vec<Vec<Option<PathBuf>>>,
     file: Option<File>,
     file_len: u64,
     disk_no: u8,
@@ -135,7 +167,7 @@ struct SidStream {
 }
 
 impl SidStream {
-    fn new(disks: Vec<Vec<PathBuf>>) -> SidStream {
+    fn new(disks: Vec<Vec<Option<PathBuf>>>) -> SidStream {
         SidStream {
             disks,
             file: None,
@@ -150,7 +182,7 @@ impl SidStream {
             .disks
             .get(disk_no.wrapping_sub(1) as usize)
             .ok_or_else(|| Error::new(format!("sid: missing disk {disk_no}")))?;
-        let path = disk.get(sid_idx).ok_or_else(|| {
+        let path = disk.get(sid_idx).and_then(|p| p.as_ref()).ok_or_else(|| {
             Error::new(format!(
                 "sid: missing .sid index {sid_idx} on disk {disk_no}"
             ))
@@ -316,46 +348,89 @@ pub fn run(args: &SidArgs) -> Result<()> {
 
     let mut disks = Vec::with_capacity(sim_paths.len());
     for sim_path in &sim_paths {
-        disks.push(find_sid_files(sim_path)?);
+        match find_sid_files(sim_path) {
+            Ok(files) => disks.push(files),
+            Err(e) => {
+                eprintln!("warning: {e}; files needing this disk will be skipped");
+                disks.push(Vec::new());
+            }
+        }
     }
     let mut stream = SidStream::new(disks);
 
     let filter = Filter::new(&args.filter)?;
 
     let base = PathBuf::from(args.out.clone().unwrap_or_else(|| "extracted".to_string()));
-    let mut warned_depots = std::collections::HashSet::new();
+    let mut warned_depots = HashSet::new();
+    let mut failed = 0usize;
 
     println!("{} entries in manifest", sim.rows.len());
 
     for row in &sim.rows {
-        let rel_path = sim.row_path(row)?;
-        let rel_str = rel_path.to_string_lossy().into_owned();
-
-        if !filter.matches(&rel_str) {
-            continue;
-        }
-
-        let key = args.keys.resolve(row.depot).unwrap_or_else(|| {
-            if warned_depots.insert(row.depot) {
-                eprintln!(
-                    "no known key for depot {}; some depots use an all-zero key, trying that",
-                    row.depot
-                );
+        match process_row(&mut stream, &sim, row, &filter, &args.keys, &mut warned_depots, &base)
+        {
+            Ok(Some(rel_str)) => println!("{rel_str}: OK"),
+            Ok(None) => {}
+            Err(e) => {
+                failed += 1;
+                eprintln!("skipped: {e}");
             }
-            [0u8; 16]
-        });
-
-        let final_path = base.join(&rel_path);
-        if let Some(parent) = final_path.parent() {
-            fs::create_dir_all(parent)?;
         }
+    }
 
-        print!("{rel_str}: ");
-        let data = extract_entry(&mut stream, row, &key)?;
-        let mut out_file = File::create(&final_path)?;
-        out_file.write_all(&data)?;
-        println!("OK");
+    if failed > 0 {
+        eprintln!("{failed} file(s) could not be extracted (see warnings above)");
     }
 
     Ok(())
+}
+
+fn process_row(
+    stream: &mut SidStream,
+    sim: &SimFile,
+    row: &SimRow,
+    filter: &Filter,
+    keys: &KeySource,
+    warned_depots: &mut HashSet<u32>,
+    base: &Path,
+) -> Result<Option<String>> {
+    let rel_path = sim.row_path(row)?;
+    let rel_str = rel_path.to_string_lossy().into_owned();
+
+    if !filter.matches(&rel_str) {
+        return Ok(None);
+    }
+
+    let key = keys.resolve(row.depot).unwrap_or_else(|| {
+        if warned_depots.insert(row.depot) {
+            eprintln!(
+                "no known key for depot {}; some depots use an all-zero key, trying that",
+                row.depot
+            );
+        }
+        [0u8; 16]
+    });
+
+    let final_path = base.join(&rel_path);
+    if let Some(parent) = final_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let data = extract_entry(stream, row, &key)?;
+    let mut out_file = File::create(&final_path)?;
+    out_file.write_all(&data)?;
+    Ok(Some(rel_str))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_implausible_row_count() {
+        let mut data = vec![0u8; 24];
+        data[0..4].copy_from_slice(&SIM_MAGIC.to_le_bytes());
+        data[12..16].copy_from_slice(&0u32.to_le_bytes());
+        data[20..24].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(SimFile::parse(&data).is_err());
+    }
 }

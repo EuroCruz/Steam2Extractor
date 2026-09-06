@@ -7,7 +7,8 @@
 ## Сборка
 
 ```
-cargo build --release
+cargo build --release (Linux)
+cargo build --release --target x86_64-pc-windows-gnu (Windows)
 ```
 
 ## Использование
@@ -32,10 +33,12 @@ file.sim          манифест .sim, по одному на диск, по �
 extract donate    поддержать проект
 ```
 
-## Донат
+## Поддержать проект
 
 ```
 Bitcoin bc1q2e60ws5yy6m5czv5wtc97z28vp8et3quvzx35c
 Solana HgqXV2YMWQggDJNDWzJ3rrczwhhy9AAUq7xZcziBqHbC
-ETH/Base/BNB 0xff7b4d8be072dd36eb221c64cdc6ba48cce83b7e
+Base 0xff7b4d8be072dd36eb221c64cdc6ba48cce83b7e
+ETH 0xff7b4d8be072dd36eb221c64cdc6ba48cce83b7e
+BNB 0xff7b4d8be072dd36eb221c64cdc6ba48cce83b7e
 ```
