@@ -25,9 +25,9 @@ file.sim          манифест .sim, по одному на диск, по �
 --dat-dir dir     директория dat, скачивается автоматически (по умолчанию: steam2_cache/dats)
 --blobcrc crc     crc blob, требуется только после сброса депо
 --key key         depot key, hex или depot:hex, можно указывать несколько раз
---keys-file file  файл с "depot" "key", по одной на строку, можно указывать несколько раз
+--keys-file file  файл с depotkey, один на строку
 --filter regex    извлекать только пути, соответствующие regex
---out dir         директория для результата
+--out dir         директория для распаковки
 --offline         офлайн, только локальные файлы
 
 extract donate    поддержать проект
