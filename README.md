@@ -1,7 +1,5 @@
 # Steam2 Extractor
 
-English | [Русский](README.ru.md)
-
 Extracts Steam2 / Steam DVD content from .dat .blob .sim .sid
 
 ## Build
