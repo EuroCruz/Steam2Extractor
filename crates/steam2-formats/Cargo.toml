@@ -1,0 +1,11 @@
+[package]
+name = "steam2-formats"
+version.workspace = true
+edition.workspace = true
+description = "steam2-formats"
+
+[dependencies]
+steam2-core = { path = "../steam2-core", version = "0.1.0" }
+steam2-hash = { path = "../steam2-hash", version = "0.1.0" }
+steam2-crypto = { path = "../steam2-crypto", version = "0.1.0" }
+steam2-compression = { path = "../steam2-compression", version = "0.1.0" }

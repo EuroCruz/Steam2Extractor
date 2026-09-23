@@ -1,0 +1,7 @@
+[package]
+name = "steam2-crypto"
+version.workspace = true
+edition.workspace = true
+description = "steam2-crypto"
+
+[dependencies]

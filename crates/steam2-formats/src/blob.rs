@@ -1,0 +1,97 @@
+use steam2_compression::inflate::zlib_decompress;
+
+pub fn rb32(n: u32) -> [u8; 4] {
+    n.to_le_bytes()
+}
+
+pub struct Blob<'a> {
+    data: &'a [u8],
+    total_size: usize,
+}
+
+impl<'a> Blob<'a> {
+    pub fn parse(data: &'a [u8]) -> Result<Blob<'a>, String> {
+        if data.len() < 10 {
+            return Err("blob: too small".to_string());
+        }
+        let magic = u16::from_le_bytes([data[0], data[1]]);
+        if magic != 0x5001 {
+            return Err("blob: bad magic".to_string());
+        }
+        let total_size = u32::from_le_bytes([data[2], data[3], data[4], data[5]]) as usize;
+        Ok(Blob { data, total_size })
+    }
+
+    pub fn get(&self, key: &[u8]) -> Option<&'a [u8]> {
+        let mut pos = 10usize;
+        while pos < self.total_size {
+            if pos + 6 > self.data.len() {
+                return None;
+            }
+            let keysize = u16::from_le_bytes([self.data[pos], self.data[pos + 1]]) as usize;
+            let valuesize = u32::from_le_bytes([
+                self.data[pos + 2],
+                self.data[pos + 3],
+                self.data[pos + 4],
+                self.data[pos + 5],
+            ]) as usize;
+            pos += 6;
+            if pos + keysize + valuesize > self.data.len() {
+                return None;
+            }
+            let keydata = &self.data[pos..pos + keysize];
+            if keydata == key {
+                return Some(&self.data[pos + keysize..pos + keysize + valuesize]);
+            }
+            pos += keysize + valuesize;
+        }
+        None
+    }
+}
+
+pub fn value_u32(v: &[u8]) -> Result<u32, String> {
+    if v.len() != 4 {
+        return Err("blob: tried to read value as u32 with bytes != 4".to_string());
+    }
+    Ok(u32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+}
+
+pub fn value_u64(v: &[u8]) -> Result<u64, String> {
+    if v.len() != 8 {
+        return Err("blob: tried to read value as u64 with bytes != 8".to_string());
+    }
+    Ok(u64::from_le_bytes(v.try_into().unwrap()))
+}
+
+const MAX_UNPACKED_SIZE: usize = 512 * 1024 * 1024;
+
+pub fn decompress_blob(data: &[u8]) -> Result<Vec<u8>, String> {
+    if data.len() < 20 {
+        return Err("blob: compressed blob too small".to_string());
+    }
+    let magic = u16::from_le_bytes([data[0], data[1]]);
+    if magic != 0x4301 {
+        return Err("blob: bad magic in compressed blob".to_string());
+    }
+    let unpacked_size = u64::from_le_bytes(data[10..18].try_into().unwrap()) as usize;
+    if unpacked_size > MAX_UNPACKED_SIZE {
+        return Err("blob: implausible unpacked size".to_string());
+    }
+    let out = zlib_decompress(&data[20..], unpacked_size)?;
+    let mut buf = vec![0u8; unpacked_size];
+    buf[..out.len()].copy_from_slice(&out);
+    Ok(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_implausible_unpacked_size() {
+        let mut data = vec![0u8; 20];
+        data[0..2].copy_from_slice(&0x4301u16.to_le_bytes());
+        data[10..18].copy_from_slice(&(MAX_UNPACKED_SIZE as u64 + 1).to_le_bytes());
+        assert!(decompress_blob(&data).is_err());
+    }
+}

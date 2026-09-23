@@ -1,0 +1,32 @@
+[package]
+name = "steam2-cli"
+version.workspace = true
+edition.workspace = true
+description = "steam2-cli"
+
+[lib]
+name = "steam2_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "steam2extract_f"
+path = "src/bin/f.rs"
+
+[[bin]]
+name = "steam2extract_d"
+path = "src/bin/d.rs"
+required-features = ["debug-tools"]
+
+[features]
+debug-tools = []
+
+[dependencies]
+steam2-formats = { path = "../steam2-formats", version = "0.1.0" }
+steam2-hash = { path = "../steam2-hash", version = "0.1.0" }
+steam2-crypto = { path = "../steam2-crypto", version = "0.1.0" }
+steam2-compression = { path = "../steam2-compression", version = "0.1.0" }
+steam2-core = { path = "../steam2-core", version = "0.1.0" }
+
+[build-dependencies]
+steam2-formats = { path = "../steam2-formats", version = "0.1.0" }
+steam2-core = { path = "../steam2-core", version = "0.1.0" }

@@ -1,0 +1,428 @@
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::PathBuf;
+
+use crate::blob::{Blob, decompress_blob, rb32, value_u32, value_u64};
+use crate::chunk::handle_chunk;
+use crate::cp1252;
+use crate::filter::Filter;
+use crate::keysource::KeySource;
+use steam2_core::reader::ByteReader;
+use crate::manifest::{CompressionType, Manifest};
+use crate::source::Source;
+
+const CHECKSUM_TABLE_MAGIC: u32 = 0x34457234;
+
+pub struct DepotArgs {
+    pub depot: u32,
+    pub version: u32,
+    pub blob_dir: String,
+    pub dat_dir: String,
+    pub blobcrc: Option<String>,
+    pub filter: Option<String>,
+    pub keys: KeySource,
+    pub out: Option<String>,
+}
+
+pub const DEFAULT_BLOB_DIR: &str = "steam2_cache/blobs";
+pub const DEFAULT_DAT_DIR: &str = "steam2_cache/dats";
+
+#[derive(Default, Clone)]
+struct FileIdMapping {
+    filemode: u8,
+    offset: u64,
+}
+
+#[derive(Clone, Copy)]
+struct ChecksumEntry {
+    compressed_size: u32,
+}
+
+#[derive(Default, Clone)]
+struct FileIdInfo {
+    info: FileIdMapping,
+    checksums: Vec<ChecksumEntry>,
+    part: i64,
+}
+
+fn parse_leading_int(s: &str, pos: &mut usize) -> Result<i64, String> {
+    let bytes = s.as_bytes();
+    let start = *pos;
+    let neg = *pos < bytes.len() && bytes[*pos] == b'-';
+    if neg {
+        *pos += 1;
+    }
+    let digits_start = *pos;
+    while *pos < bytes.len() && bytes[*pos].is_ascii_digit() {
+        *pos += 1;
+    }
+    if *pos == digits_start {
+        return Err(format!("could not parse integer in '{}'", s));
+    }
+    s[start..*pos].parse().map_err(|_| format!("could not parse integer in '{}'", s))
+}
+
+fn parse_two_ints_prefix(s: &str) -> Result<(i64, i64), String> {
+    let mut pos = 0;
+    let a = parse_leading_int(s, &mut pos)?;
+    if s.as_bytes().get(pos) != Some(&b'_') {
+        return Err(format!("expected '_' while parsing '{}'", s));
+    }
+    pos += 1;
+    let b = parse_leading_int(s, &mut pos)?;
+    Ok((a, b))
+}
+
+fn parse_out_checksum_info(blob_source: &Source, filename: &str) -> Result<BTreeMap<u32, FileIdInfo>, String> {
+    let (_depot, archive_part) = parse_two_ints_prefix(filename)?;
+
+    let path = blob_source.resolve(filename)?;
+    let data = fs::read(&path).map_err(|e| e.to_string())?;
+    let blob = Blob::parse(&data)?;
+    let csum = blob.get(&rb32(4)).ok_or("parse_out_checksum_info: missing checksum table key")?;
+
+    let mut r = ByteReader::new(csum);
+    let magic = r.read_u32()?;
+    let version = r.read_u32()?;
+    let num_fileblocks = r.read_u32()?;
+    let num_items = r.read_u32()?;
+    let offset1 = r.read_u32()?;
+    let offset2 = r.read_u32()?;
+    let blocksize = r.read_u32()?;
+    let largest_num_blocks = r.read_u32()?;
+
+    if magic != CHECKSUM_TABLE_MAGIC {
+        return Err("parse_out_checksum_info: bad file magic".to_string());
+    }
+    if blocksize != 0x8000 {
+        return Err("parse_out_checksum_info: blocksize != 0x8000".to_string());
+    }
+    if version != 0 && version != 1 {
+        return Err("parse_out_checksum_info: bad version".to_string());
+    }
+    if offset1 != 0x20 {
+        return Err("parse_out_checksum_info: bad fileidtable offset".to_string());
+    }
+    if offset2 != 0x20 + 0x10 * num_fileblocks {
+        return Err("parse_out_checksum_info: bad mapping table offset".to_string());
+    }
+
+    struct TableEntry {
+        fileid_start: u32,
+        filecount: u32,
+        offset: u32,
+    }
+    if num_fileblocks as usize > csum.len() / 16 {
+        return Err("parse_out_checksum_info: implausible fileblock count".to_string());
+    }
+    let mut table = Vec::with_capacity(num_fileblocks as usize);
+    for _ in 0..num_fileblocks {
+        let fileid_start = r.read_u32()?;
+        let filecount = r.read_u32()?;
+        let offset = r.read_u32()?;
+        let _dummy4 = r.read_u32()?;
+        table.push(TableEntry { fileid_start, filecount, offset });
+    }
+
+    let mut filecount_actual = 0u32;
+    let mut max_blocks_actual = 0u32;
+    let mut fileids = BTreeMap::new();
+
+    for entry in &table {
+        if r.pos as u32 != entry.offset {
+            return Err("parse_out_checksum_info: reader position != offset".to_string());
+        }
+        filecount_actual += entry.filecount;
+        for fileid in entry.fileid_start..entry.fileid_start + entry.filecount {
+            let (filesize_or_offset_pair, num_blocks_raw) = if version == 0 {
+                let _filesize = r.read_u32()? as u64;
+                let offset = r.read_u32()? as u64;
+                let raw = r.read_u32()?;
+                (offset, raw)
+            } else {
+                let _filesize = r.read_u64()?;
+                let offset = r.read_u64()?;
+                let raw = r.read_u32()?;
+                (offset, raw)
+            };
+            let filemode = (num_blocks_raw >> 24) as u8;
+            let numblocks = num_blocks_raw & 0x00ff_ffff;
+            if !(filemode == 1 || filemode == 2 || filemode == 3) {
+                return Err("parse_out_checksum_info: filemode out of range".to_string());
+            }
+            max_blocks_actual = max_blocks_actual.max(numblocks);
+
+            if numblocks as usize > csum.len() / 8 {
+                return Err("parse_out_checksum_info: implausible block count".to_string());
+            }
+            let mut checksums = Vec::with_capacity(numblocks as usize);
+            for _ in 0..numblocks {
+                let compressed_size = r.read_u32()?;
+                let _checksum = r.read_u32()?;
+                checksums.push(ChecksumEntry { compressed_size });
+            }
+
+            fileids.insert(
+                fileid,
+                FileIdInfo { info: FileIdMapping { filemode, offset: filesize_or_offset_pair }, checksums, part: archive_part },
+            );
+        }
+    }
+
+    if r.read_u32()? != CHECKSUM_TABLE_MAGIC {
+        return Err("parse_out_checksum_info: bad footer magic".to_string());
+    }
+    if max_blocks_actual != largest_num_blocks {
+        return Err("parse_out_checksum_info: maximum file blockcount != header count".to_string());
+    }
+    if filecount_actual != num_items {
+        return Err("parse_out_checksum_info: actual count of files is different than one reported in the header".to_string());
+    }
+
+    Ok(fileids)
+}
+
+struct WantedFiles {
+    dats: BTreeMap<i64, String>,
+    blobs: BTreeMap<i64, String>,
+}
+
+fn blob_dat_size(blob: &Blob) -> Option<u64> {
+    let format_code = value_u32(blob.get(&rb32(0))?).ok()?;
+    match format_code {
+        3 => value_u32(blob.get(&rb32(13))?).ok().map(u64::from),
+        4 => value_u64(blob.get(&rb32(13))?).ok(),
+        _ => None,
+    }
+}
+
+fn pick_consistent_pair(
+    blob_source: &Source,
+    dat_source: &Source,
+    blob_names: &[String],
+    dat_names: &[String],
+) -> Result<(String, String), String> {
+    if blob_names.len() == 1 && dat_names.len() == 1 {
+        blob_source.resolve(&blob_names[0])?;
+        dat_source.resolve(&dat_names[0])?;
+        return Ok((blob_names[0].clone(), dat_names[0].clone()));
+    }
+
+    let mut ordered_blobs: Vec<&String> = blob_names.iter().collect();
+    ordered_blobs.sort_by_key(|n| !blob_source.exists_locally(n));
+    let mut ordered_dats: Vec<&String> = dat_names.iter().collect();
+    ordered_dats.sort_by_key(|n| !dat_source.exists_locally(n));
+
+    let mut last_err = None;
+    for blob_name in &ordered_blobs {
+        let path = match blob_source.resolve(blob_name) {
+            Ok(p) => p,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        };
+        let data = fs::read(&path).map_err(|e| e.to_string())?;
+        let blob = Blob::parse(&data)?;
+        let Some(dat_size) = blob_dat_size(&blob) else { continue };
+        for dat_name in &ordered_dats {
+            if dat_source.size(dat_name).ok() == Some(dat_size) && dat_source.resolve(dat_name).is_ok() {
+                return Ok(((*blob_name).clone(), (*dat_name).clone()));
+            }
+        }
+    }
+
+    Err(format!(
+        "find_wanted_files[naive]: no consistent blob/dat pair (depot was likely reset more than once); pass --blobcrc to pick one manually{}",
+        last_err.map(|e| format!(" ({e})")).unwrap_or_default()
+    ))
+}
+
+fn find_wanted_files_naive(blob_source: &Source, dat_source: &Source, depot: u32, version: u32) -> Result<WantedFiles, String> {
+    let prefix = format!("{}_", depot);
+    let mut blob_candidates: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+    for filename in blob_source.list(depot, &prefix, ".blob")? {
+        let (_depot, blobver) = parse_two_ints_prefix(&filename)?;
+        if blobver <= version as i64 {
+            blob_candidates.entry(blobver).or_default().push(filename);
+        }
+    }
+    let mut dat_candidates: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+    for filename in dat_source.list(depot, &prefix, ".dat")? {
+        let (_depot, blobver) = parse_two_ints_prefix(&filename)?;
+        if blobver <= version as i64 {
+            dat_candidates.entry(blobver).or_default().push(filename);
+        }
+    }
+
+    let mut wanted_blobs = BTreeMap::new();
+    let mut wanted_dats = BTreeMap::new();
+    for i in 0..=version as i64 {
+        let (Some(blobs), Some(dats)) = (blob_candidates.get(&i), dat_candidates.get(&i)) else {
+            return Err("find_wanted_files[naive]: missing a blob or a dat file!".to_string());
+        };
+        let (blob, dat) = pick_consistent_pair(blob_source, dat_source, blobs, dats)?;
+        wanted_blobs.insert(i, blob);
+        wanted_dats.insert(i, dat);
+    }
+
+    Ok(WantedFiles { dats: wanted_dats, blobs: wanted_blobs })
+}
+
+fn find_wanted_files_smart(
+    blob_source: &Source,
+    dat_source: &Source,
+    depot: u32,
+    version: u32,
+    crc_top: &str,
+) -> Result<WantedFiles, String> {
+    let prefix = format!("{}_", depot);
+    let considered_blobs = blob_source.list(depot, &prefix, ".blob")?;
+    let considered_dats = dat_source.list(depot, &prefix, ".dat")?;
+
+    let looking_for_top = format!("{}_{}_{}_", depot, version, crc_top);
+    let top_blob = considered_blobs
+        .iter()
+        .find(|f| f.starts_with(&looking_for_top))
+        .cloned()
+        .ok_or("no blob found with this crc value")?;
+
+    let mut wanted_dats = BTreeMap::new();
+    let mut wanted_blobs = BTreeMap::new();
+    wanted_blobs.insert(version as i64, top_blob.clone());
+
+    let mut current_blob = top_blob;
+    let mut current_version = version as i64;
+    loop {
+        let path = blob_source.resolve(&current_blob)?;
+        let data = fs::read(&path).map_err(|e| e.to_string())?;
+        let blob = Blob::parse(&data)?;
+
+        let format_code = value_u32(blob.get(&rb32(0)).ok_or("smart: missing format code key")?)?;
+        let dat_size = if format_code == 3 {
+            value_u32(blob.get(&rb32(13)).ok_or("smart: missing dat size key")?)? as u64
+        } else if format_code == 4 {
+            value_u64(blob.get(&rb32(13)).ok_or("smart: missing dat size key")?)?
+        } else {
+            return Err("find_wanted_files[smart]: unknown blob format code".to_string());
+        };
+
+        let looking_for_dat = format!("{}_{}_", depot, current_version);
+        let mut our_dat = None;
+        for candidate in &considered_dats {
+            if candidate.starts_with(&looking_for_dat) && dat_source.size(candidate)? == dat_size {
+                our_dat = Some(candidate.clone());
+                break;
+            }
+        }
+        let our_dat = our_dat.ok_or("find_wanted_files[smart]: no corresponding dat file for blob")?;
+        wanted_dats.insert(current_version, our_dat);
+
+        if current_version == 0 {
+            break;
+        }
+
+        let prev_crc = value_u32(blob.get(&rb32(12)).ok_or("smart: missing prev crc key")?)?;
+        let looking_for = format!("{}_{}_{:08x}_", depot, current_version - 1, prev_crc);
+        let parent = considered_blobs
+            .iter()
+            .find(|f| f.starts_with(&looking_for))
+            .cloned()
+            .ok_or("find_wanted_files[smart]: couldn't find a child blob (missing/corrupted parent blob)")?;
+        wanted_blobs.insert(current_version - 1, parent.clone());
+
+        current_blob = parent;
+        current_version -= 1;
+    }
+
+    Ok(WantedFiles { dats: wanted_dats, blobs: wanted_blobs })
+}
+
+pub fn run(args: &DepotArgs) -> Result<(), String> {
+    let filter = Filter::new(&args.filter)?;
+
+    let key = args.keys.resolve(args.depot).unwrap_or_else(|| {
+        eprintln!("no known key for depot {}; some depots use an all-zero key, trying that", args.depot);
+        [0u8; 16]
+    });
+
+    let blob_source = Source::blobs(PathBuf::from(&args.blob_dir));
+    let dat_source = Source::dats(PathBuf::from(&args.dat_dir));
+
+    let wanted = match &args.blobcrc {
+        Some(crc) => find_wanted_files_smart(&blob_source, &dat_source, args.depot, args.version, crc)?,
+        None => find_wanted_files_naive(&blob_source, &dat_source, args.depot, args.version)?,
+    };
+
+    let mut fileids: BTreeMap<u32, FileIdInfo> = BTreeMap::new();
+    for filename in wanted.blobs.values() {
+        let parsed = parse_out_checksum_info(&blob_source, filename)?;
+        fileids.extend(parsed);
+    }
+    println!("fileid table created");
+
+    let mut dat_files: BTreeMap<i64, fs::File> = BTreeMap::new();
+    for (&index, filename) in &wanted.dats {
+        let path = dat_source.resolve(filename)?;
+        dat_files.insert(index, fs::File::open(path).map_err(|e| e.to_string())?);
+    }
+    println!("dat files opened");
+
+    let last_blob_name = wanted.blobs.values().last().unwrap();
+    let last_blob_path = blob_source.resolve(last_blob_name)?;
+    let last_blob_data = fs::read(&last_blob_path).map_err(|e| e.to_string())?;
+    let last_blob = Blob::parse(&last_blob_data)?;
+    let manifest_container = last_blob.get(&rb32(3)).ok_or("extract: missing manifest key in top blob")?;
+    let manifest_blob_data = decompress_blob(manifest_container)?;
+    let manifest_blob = Blob::parse(&manifest_blob_data)?;
+    let manifest_data = manifest_blob.get(&rb32(0)).ok_or("extract: missing manifest data key")?;
+    let manifest = Manifest::parse(manifest_data)?;
+
+    println!("manifest loaded {} {}", manifest.header.app_id, manifest.header.ver_id);
+
+    let base = match &args.out {
+        Some(out) => PathBuf::from(out),
+        None => PathBuf::from(format!("{}_{}", manifest.header.app_id, manifest.header.ver_id)),
+    };
+
+    for entry in &manifest.nodes {
+        let raw_rel_path = manifest.id_to_path.get(&entry.file_id).cloned().unwrap_or_default();
+        let rel_path = cp1252::sanitize_path(&raw_rel_path);
+
+        if !filter.matches(&rel_path) {
+            continue;
+        }
+        if entry.flags == 0 {
+            continue;
+        }
+
+        let final_path = base.join(&rel_path);
+        if let Some(parent) = final_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let mut out_file = fs::File::create(&final_path).map_err(|e| e.to_string())?;
+
+        let info = fileids.get(&entry.file_id).cloned().unwrap_or_default();
+        let mut current_offset = info.info.offset;
+        let cmptype = if info.checksums.is_empty() { None } else { Some(CompressionType::from_u8(info.info.filemode)?) };
+
+        for block in &info.checksums {
+            if block.compressed_size == 0 {
+                continue;
+            }
+            if block.compressed_size > 0x10000 {
+                return Err("extract: implausible compressed block size".to_string());
+            }
+            let dat_file = dat_files.get_mut(&info.part).ok_or("extract: missing dat file part for entry")?;
+            dat_file.seek(SeekFrom::Start(current_offset)).map_err(|e| e.to_string())?;
+            let mut buf = vec![0u8; block.compressed_size as usize];
+            dat_file.read_exact(&mut buf).map_err(|e| e.to_string())?;
+            let decoded = handle_chunk(&buf, cmptype.unwrap(), &key)?;
+            out_file.write_all(&decoded).map_err(|e| e.to_string())?;
+            current_offset += block.compressed_size as u64;
+        }
+    }
+
+    Ok(())
+}

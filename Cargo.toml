@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+flate2 = "1.1.10"
+lzxc = "0.1"
+lzxd = "0.2"
+
+[profile.release]
+panic = "abort"

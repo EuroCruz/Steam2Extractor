@@ -1,0 +1,6 @@
+/target
+/dist
+/steam2_cache/
+/extracted/
+*.part
+Cargo.lock
