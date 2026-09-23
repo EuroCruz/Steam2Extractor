@@ -25,7 +25,7 @@ pub fn list(
             let target = steam2_formats::inspect::resolve_target(path, blob_dir, dat_dir)?;
             steam2_formats::inspect::list_depot(&target, keys)?
         }
-        "bin" => steam2_formats::inspect::list_dict(path)?,
+        "bin" => steam2_formats::inspect::list_dict(path, None)?,
         other => return Err(format!("list: unsupported file extension '.{other}'")),
     };
 
@@ -161,7 +161,7 @@ pub fn debug_dictbin(
 }
 
 #[cfg(feature = "debug-tools")]
-pub fn debug_dictbin_recompress(compression: &str, endian: &str, out_dir: &std::path::Path) -> Result<(), String> {
+pub fn debug_dictbin_rebuild(compression: &str, endian: &str, out_dir: &std::path::Path) -> Result<(), String> {
     let comp = dictbin_compression(compression)?;
     let end = dictbin_endian(endian)?;
     std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
@@ -182,6 +182,31 @@ pub fn debug_dictbin_recompress(compression: &str, endian: &str, out_dir: &std::
     write_generated(&out_dir.join(steam2_formats::dictbin::Kind::Dats.file_name()), &out_dats)?;
 
     println!("repacked keys/blobs/dats -> {} ({compression}, {endian})", out_dir.display());
+    Ok(())
+}
+
+#[cfg(feature = "debug-tools")]
+fn dictbin_kind(s: &str) -> Result<steam2_formats::dictbin::Kind, String> {
+    match s {
+        "keys" => Ok(steam2_formats::dictbin::Kind::Keys),
+        "blobs" => Ok(steam2_formats::dictbin::Kind::Blobs),
+        "dats" => Ok(steam2_formats::dictbin::Kind::Dats),
+        other => Err(format!("unknown dictionary kind '{other}' (known: keys, blobs, dats)")),
+    }
+}
+
+#[cfg(feature = "debug-tools")]
+pub fn debug_dictbin_lookup(kind: &str, hash: u32) -> Result<(), String> {
+    let kind = dictbin_kind(kind)?;
+    let path = steam2_formats::dictbin::bin_dir()?.join(kind.file_name());
+    let entries = steam2_formats::inspect::list_dict(&path, Some(hash))?;
+    if entries.is_empty() {
+        println!("no entry with pandemic 0x{hash:08x} in {}", kind.file_name());
+    } else {
+        for e in &entries {
+            println!("{}  {}  {}", e.detail, e.size, e.name);
+        }
+    }
     Ok(())
 }
 

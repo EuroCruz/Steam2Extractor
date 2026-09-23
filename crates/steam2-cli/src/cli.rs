@@ -14,7 +14,9 @@ pub enum Command {
     #[cfg(feature = "debug-tools")]
     DebugDictBin { keys_path: String, blobs_path: String, dats_path: String, out_dir: std::path::PathBuf, compression: String, endian: String },
     #[cfg(feature = "debug-tools")]
-    DebugDictBinRecompress { compression: String, endian: String, out_dir: std::path::PathBuf },
+    DebugDictBinRebuild { compression: String, endian: String, out_dir: std::path::PathBuf },
+    #[cfg(feature = "debug-tools")]
+    DebugDictBinLookup { kind: String, hash: u32 },
 }
 
 fn parse_common_flag(
@@ -209,6 +211,16 @@ fn is_endian(s: &str) -> bool {
     matches!(s, "le" | "be")
 }
 
+#[cfg(feature = "debug-tools")]
+fn is_dictbin_kind(s: &str) -> bool {
+    matches!(s, "keys" | "blobs" | "dats")
+}
+
+#[cfg(feature = "debug-tools")]
+fn parse_pandemic_hex(s: &str) -> Option<u32> {
+    u32::from_str_radix(s.strip_prefix("0x").unwrap_or(s), 16).ok()
+}
+
 pub fn parse(args: &[String]) -> Option<Result<Command, String>> {
     match args {
         [cmd, text] if cmd == "hash" => Some(Ok(Command::Hash { text: text.clone() })),
@@ -248,14 +260,18 @@ pub fn parse(args: &[String]) -> Option<Result<Command, String>> {
             }))
         }
         #[cfg(feature = "debug-tools")]
-        [cmd, sub, out_dir] if cmd == "debug" && sub == "dictbin-recompress" => {
-            Some(Ok(Command::DebugDictBinRecompress { compression: "lzxd".into(), endian: "le".into(), out_dir: out_dir.into() }))
+        [cmd, sub, out_dir] if cmd == "debug" && sub == "dictbin-rebuild" => {
+            Some(Ok(Command::DebugDictBinRebuild { compression: "lzxd".into(), endian: "le".into(), out_dir: out_dir.into() }))
         }
         #[cfg(feature = "debug-tools")]
         [cmd, sub, out_dir, comp, endian]
-            if cmd == "debug" && sub == "dictbin-recompress" && is_dictbin_compression(comp) && is_endian(endian) =>
+            if cmd == "debug" && sub == "dictbin-rebuild" && is_dictbin_compression(comp) && is_endian(endian) =>
         {
-            Some(Ok(Command::DebugDictBinRecompress { compression: comp.clone(), endian: endian.clone(), out_dir: out_dir.into() }))
+            Some(Ok(Command::DebugDictBinRebuild { compression: comp.clone(), endian: endian.clone(), out_dir: out_dir.into() }))
+        }
+        #[cfg(feature = "debug-tools")]
+        [cmd, sub, kind, hash] if cmd == "debug" && sub == "dictbin-lookup" && is_dictbin_kind(kind) => {
+            Some(parse_pandemic_hex(hash).ok_or_else(|| format!("invalid pandemic hash '{hash}'")).map(|hash| Command::DebugDictBinLookup { kind: kind.clone(), hash }))
         }
         [cmd, ..] if cmd == "extract" => {
             let rest = &args[1..];
@@ -281,9 +297,8 @@ fn debug_usage_lines() -> Vec<String> {
         String::new(),
         "DEBUG".to_string(),
         "  debug dictbin <keys.txt> <blobs.txt> <dats.txt> <out_dir> [comp] [endian]".to_string(),
-        "                                                    build steam2_keys.bin / steam2_blobs.bin / steam2_dats.bin".to_string(),
-        "  debug dictbin-recompress <out_dir> [comp] [endian]".to_string(),
-        "                                                    repack the running dictionaries with new options".to_string(),
+        "  debug dictbin-rebuild <out_dir> [comp] [endian]".to_string(),
+        "  debug dictbin-lookup <keys|blobs|dats> <pandemic_hex>".to_string(),
         String::new(),
         "  compression     raw (default) | lzxd | sges".to_string(),
         "  endian          le (default) | be".to_string(),
@@ -292,7 +307,7 @@ fn debug_usage_lines() -> Vec<String> {
 
 pub fn usage() -> String {
     let lines = vec![
-        format!("Steam2ExtractV2 v{VERSION} — offline Steam2 depot/blob/dat/sid extractor"),
+        format!("Steam2ExtractV2 v{VERSION} — Steam2 depot/blob/dat/sid extractor"),
         String::new(),
         "USAGE".to_string(),
         "  steam2extract extract <depot> <version> [options]     extract a depot from blob/dat files".to_string(),

@@ -41,9 +41,11 @@ pub fn run() -> ExitCode {
             commands::debug_dictbin(keys_path, blobs_path, dats_path, out_dir, compression, endian)
         }
         #[cfg(feature = "debug-tools")]
-        cli::Command::DebugDictBinRecompress { compression, endian, out_dir } => {
-            commands::debug_dictbin_recompress(compression, endian, out_dir)
+        cli::Command::DebugDictBinRebuild { compression, endian, out_dir } => {
+            commands::debug_dictbin_rebuild(compression, endian, out_dir)
         }
+        #[cfg(feature = "debug-tools")]
+        cli::Command::DebugDictBinLookup { kind, hash } => commands::debug_dictbin_lookup(kind, *hash),
     };
 
     if let Err(e) = result {

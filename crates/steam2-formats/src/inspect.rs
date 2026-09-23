@@ -94,15 +94,17 @@ pub enum DictContent {
     Names(Vec<dictbin::NameRecord>, &'static str),
 }
 
-pub fn list_dict(path: &Path) -> Result<Vec<Entry>, String> {
+pub fn list_dict(path: &Path, pandemic: Option<u32>) -> Result<Vec<Entry>, String> {
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
     match dict_content(&data)? {
         DictContent::Keys(records) => Ok(records
             .into_iter()
+            .filter(|k| pandemic.is_none_or(|h| k.pandemic == h))
             .map(|k| Entry { name: format!("depot {}", k.depot), size: 16, detail: format!("pandemic 0x{:08x}", k.pandemic) })
             .collect()),
         DictContent::Names(records, suffix) => Ok(records
             .into_iter()
+            .filter(|n| pandemic.is_none_or(|h| n.pandemic == h))
             .map(|n| Entry { name: n.filename(suffix), size: 0, detail: format!("pandemic 0x{:08x}", n.pandemic) })
             .collect()),
     }
