@@ -1,3 +1,6 @@
+use std::io::Write;
+use std::path::Path;
+
 use crate::cli::{DepotArgs, SidArgs};
 
 pub fn extract_depot(args: &DepotArgs) -> Result<(), String> {
@@ -6,6 +9,58 @@ pub fn extract_depot(args: &DepotArgs) -> Result<(), String> {
 
 pub fn extract_sid(args: &SidArgs) -> Result<(), String> {
     steam2_formats::sim::run(args)
+}
+
+pub fn list(
+    path: &Path,
+    blob_dir: Option<&str>,
+    dat_dir: Option<&str>,
+    keys: &steam2_formats::keysource::KeySource,
+    out_file: Option<&Path>,
+) -> Result<(), String> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let entries = match ext.as_str() {
+        "sim" => steam2_formats::inspect::list_sim(path)?,
+        "dat" | "blob" => {
+            let target = steam2_formats::inspect::resolve_target(path, blob_dir, dat_dir)?;
+            steam2_formats::inspect::list_depot(&target, keys)?
+        }
+        "bin" => steam2_formats::inspect::list_dict(path)?,
+        other => return Err(format!("list: unsupported file extension '.{other}'")),
+    };
+
+    let mut buf = Vec::new();
+    for (i, e) in entries.iter().enumerate() {
+        let _ = writeln!(buf, "{i:<5} {:>10} {}  {}", e.size, e.detail, e.name);
+    }
+    let _ = writeln!(buf, "\n{} entries", entries.len());
+
+    match out_file {
+        Some(out_file) => {
+            write_generated(out_file, &buf)?;
+            println!("wrote {} entries -> {}", entries.len(), out_file.display());
+        }
+        None => {
+            let mut out = std::io::BufWriter::new(std::io::stdout());
+            let _ = out.write_all(&buf);
+        }
+    }
+    Ok(())
+}
+
+pub fn verify(path: &Path, blob_dir: Option<&str>, dat_dir: Option<&str>, keys: &steam2_formats::keysource::KeySource) -> Result<(), String> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let verdict = match ext.as_str() {
+        "sim" => steam2_formats::inspect::verify_sim(path)?,
+        "dat" | "blob" => {
+            let target = steam2_formats::inspect::resolve_target(path, blob_dir, dat_dir)?;
+            steam2_formats::inspect::verify_depot(&target, keys)?
+        }
+        "bin" => steam2_formats::inspect::verify_dict(path)?,
+        other => return Err(format!("verify: unsupported file extension '.{other}'")),
+    };
+    println!("verdict : VALID ({verdict})");
+    Ok(())
 }
 
 pub fn hash(text: &str) -> Result<(), String> {
@@ -130,7 +185,6 @@ pub fn debug_dictbin_recompress(compression: &str, endian: &str, out_dir: &std::
     Ok(())
 }
 
-#[cfg(feature = "debug-tools")]
 fn write_generated(out_path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {

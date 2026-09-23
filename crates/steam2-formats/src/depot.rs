@@ -25,22 +25,22 @@ pub struct DepotArgs {
     pub out: Option<String>,
 }
 
-pub const DEFAULT_BLOB_DIR: &str = "steam2_cache/blobs";
-pub const DEFAULT_DAT_DIR: &str = "steam2_cache/dats";
+pub const DEFAULT_BLOB_DIR: &str = "blob";
+pub const DEFAULT_DAT_DIR: &str = "dat";
 
 #[derive(Default, Clone)]
-struct FileIdMapping {
+pub struct FileIdMapping {
     filemode: u8,
     offset: u64,
 }
 
 #[derive(Clone, Copy)]
-struct ChecksumEntry {
+pub struct ChecksumEntry {
     compressed_size: u32,
 }
 
 #[derive(Default, Clone)]
-struct FileIdInfo {
+pub struct FileIdInfo {
     info: FileIdMapping,
     checksums: Vec<ChecksumEntry>,
     part: i64,
@@ -181,6 +181,12 @@ fn parse_out_checksum_info(blob_source: &Source, filename: &str) -> Result<BTree
     }
 
     Ok(fileids)
+}
+
+impl FileIdInfo {
+    pub fn block_count(&self) -> usize {
+        self.checksums.len()
+    }
 }
 
 struct WantedFiles {
@@ -339,20 +345,32 @@ fn find_wanted_files_smart(
     Ok(WantedFiles { dats: wanted_dats, blobs: wanted_blobs })
 }
 
-pub fn run(args: &DepotArgs) -> Result<(), String> {
-    let filter = Filter::new(&args.filter)?;
+pub struct Loaded {
+    pub manifest: Manifest,
+    pub fileids: BTreeMap<u32, FileIdInfo>,
+    pub dat_files: BTreeMap<i64, fs::File>,
+    pub key: [u8; 16],
+}
 
-    let key = args.keys.resolve(args.depot).unwrap_or_else(|| {
-        eprintln!("no known key for depot {}; some depots use an all-zero key, trying that", args.depot);
+pub fn load(
+    blob_dir: &str,
+    dat_dir: &str,
+    depot: u32,
+    version: u32,
+    blobcrc: &Option<String>,
+    keys: &crate::keysource::KeySource,
+) -> Result<Loaded, String> {
+    let key = keys.resolve(depot).unwrap_or_else(|| {
+        eprintln!("no known key for depot {depot}; some depots use an all-zero key, trying that");
         [0u8; 16]
     });
 
-    let blob_source = Source::blobs(PathBuf::from(&args.blob_dir));
-    let dat_source = Source::dats(PathBuf::from(&args.dat_dir));
+    let blob_source = Source::blobs(PathBuf::from(blob_dir));
+    let dat_source = Source::dats(PathBuf::from(dat_dir));
 
-    let wanted = match &args.blobcrc {
-        Some(crc) => find_wanted_files_smart(&blob_source, &dat_source, args.depot, args.version, crc)?,
-        None => find_wanted_files_naive(&blob_source, &dat_source, args.depot, args.version)?,
+    let wanted = match blobcrc {
+        Some(crc) => find_wanted_files_smart(&blob_source, &dat_source, depot, version, crc)?,
+        None => find_wanted_files_naive(&blob_source, &dat_source, depot, version)?,
     };
 
     let mut fileids: BTreeMap<u32, FileIdInfo> = BTreeMap::new();
@@ -360,14 +378,12 @@ pub fn run(args: &DepotArgs) -> Result<(), String> {
         let parsed = parse_out_checksum_info(&blob_source, filename)?;
         fileids.extend(parsed);
     }
-    println!("fileid table created");
 
     let mut dat_files: BTreeMap<i64, fs::File> = BTreeMap::new();
     for (&index, filename) in &wanted.dats {
         let path = dat_source.resolve(filename)?;
         dat_files.insert(index, fs::File::open(path).map_err(|e| e.to_string())?);
     }
-    println!("dat files opened");
 
     let last_blob_name = wanted.blobs.values().last().unwrap();
     let last_blob_path = blob_source.resolve(last_blob_name)?;
@@ -379,7 +395,20 @@ pub fn run(args: &DepotArgs) -> Result<(), String> {
     let manifest_data = manifest_blob.get(&rb32(0)).ok_or("extract: missing manifest data key")?;
     let manifest = Manifest::parse(manifest_data)?;
 
-    println!("manifest loaded {} {}", manifest.header.app_id, manifest.header.ver_id);
+    Ok(Loaded { manifest, fileids, dat_files, key })
+}
+
+pub fn run(args: &DepotArgs) -> Result<(), String> {
+    let filter = Filter::new(&args.filter)?;
+    let loaded = load(&args.blob_dir, &args.dat_dir, args.depot, args.version, &args.blobcrc, &args.keys)?;
+    println!("fileid table created");
+    println!("dat files opened");
+    println!("manifest loaded {} {}", loaded.manifest.header.app_id, loaded.manifest.header.ver_id);
+
+    let manifest = &loaded.manifest;
+    let fileids = &loaded.fileids;
+    let key = loaded.key;
+    let mut dat_files = loaded.dat_files;
 
     let base = match &args.out {
         Some(out) => PathBuf::from(out),

@@ -1,6 +1,6 @@
 /target
 /dist
-/steam2_cache/
+/blob/
+/dat/
 /extracted/
 *.part
-Cargo.lock

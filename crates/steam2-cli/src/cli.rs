@@ -6,6 +6,8 @@ pub use steam2_formats::sim::SidArgs;
 pub enum Command {
     ExtractDepot(DepotArgs),
     ExtractSid(SidArgs),
+    List { path: std::path::PathBuf, blob_dir: Option<String>, dat_dir: Option<String>, keys: steam2_formats::keysource::KeySource, out_file: Option<std::path::PathBuf> },
+    Verify { path: std::path::PathBuf, blob_dir: Option<String>, dat_dir: Option<String>, keys: steam2_formats::keysource::KeySource },
     Hash { text: String },
     Version,
     Donate,
@@ -56,11 +58,63 @@ fn parse_common_flag(
     }
 }
 
-const DEFAULT_BLOB_DIR: &str = "steam2_cache/blobs";
-const DEFAULT_DAT_DIR: &str = "steam2_cache/dats";
+const DEFAULT_BLOB_DIR: &str = "blob";
+const DEFAULT_DAT_DIR: &str = "dat";
 
 fn is_sim_file(a: &str) -> bool {
     !a.starts_with("--") && a.to_ascii_lowercase().ends_with(".sim")
+}
+
+fn parse_list_or_verify(argv: &[String]) -> Result<(std::path::PathBuf, Option<String>, Option<String>, steam2_formats::keysource::KeySource, Option<std::path::PathBuf>), String> {
+    let mut positionals = Vec::new();
+    let mut blob_dir = None;
+    let mut dat_dir = None;
+    let mut keys = steam2_formats::keysource::KeySource::default();
+
+    let mut i = 0;
+    while i < argv.len() {
+        let arg = &argv[i];
+        match arg.as_str() {
+            "--key" => {
+                i += 1;
+                let value = argv.get(i).ok_or("missing value for --key")?;
+                keys.add(value)?;
+                i += 1;
+            }
+            "--keys-file" => {
+                i += 1;
+                let value = argv.get(i).ok_or("missing value for --keys-file")?;
+                keys.add_file(value)?;
+                i += 1;
+            }
+            "--blob-dir" => {
+                i += 1;
+                blob_dir = Some(argv.get(i).ok_or("missing value for --blob-dir")?.clone());
+                i += 1;
+            }
+            "--dat-dir" => {
+                i += 1;
+                dat_dir = Some(argv.get(i).ok_or("missing value for --dat-dir")?.clone());
+                i += 1;
+            }
+            _ if arg.starts_with("--") => return Err(format!("unknown option {}", arg)),
+            _ => {
+                positionals.push(arg.clone());
+                i += 1;
+            }
+        }
+    }
+
+    if positionals.is_empty() {
+        return Err("missing required argument: file".to_string());
+    }
+    if positionals.len() > 2 {
+        return Err("too many arguments".to_string());
+    }
+
+    let path = std::path::PathBuf::from(&positionals[0]);
+    let out_file = positionals.get(1).map(std::path::PathBuf::from);
+    Ok((path, blob_dir, dat_dir, keys, out_file))
 }
 
 fn parse_depot(argv: &[String]) -> Result<DepotArgs, String> {
@@ -211,6 +265,12 @@ pub fn parse(args: &[String]) -> Option<Result<Command, String>> {
                 Some(parse_depot(rest).map(Command::ExtractDepot))
             }
         }
+        [cmd, ..] if cmd == "list" => Some(parse_list_or_verify(&args[1..]).map(|(path, blob_dir, dat_dir, keys, out_file)| {
+            Command::List { path, blob_dir, dat_dir, keys, out_file }
+        })),
+        [cmd, ..] if cmd == "verify" => Some(parse_list_or_verify(&args[1..]).map(|(path, blob_dir, dat_dir, keys, _)| {
+            Command::Verify { path, blob_dir, dat_dir, keys }
+        })),
         _ => None,
     }
 }
@@ -237,6 +297,8 @@ pub fn usage() -> String {
         "USAGE".to_string(),
         "  steam2extract extract <depot> <version> [options]     extract a depot from blob/dat files".to_string(),
         "  steam2extract extract <file.sim> [file2.sim ...] [options]  extract from a .sim/.sid set".to_string(),
+        "  steam2extract list    <file> [out_file] [options]     list a .dat/.blob/.sim/.bin file's entries".to_string(),
+        "  steam2extract verify  <file> [options]                 check that a file is well-formed".to_string(),
         String::new(),
         "OPTIONS".to_string(),
         format!("  --blob-dir dir    blob directory (default: {DEFAULT_BLOB_DIR})"),

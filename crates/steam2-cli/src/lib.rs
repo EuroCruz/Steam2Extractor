@@ -29,6 +29,10 @@ pub fn run() -> ExitCode {
     let result = match &command {
         cli::Command::ExtractDepot(args) => commands::extract_depot(args),
         cli::Command::ExtractSid(args) => commands::extract_sid(args),
+        cli::Command::List { path, blob_dir, dat_dir, keys, out_file } => {
+            commands::list(path, blob_dir.as_deref(), dat_dir.as_deref(), keys, out_file.as_deref())
+        }
+        cli::Command::Verify { path, blob_dir, dat_dir, keys } => commands::verify(path, blob_dir.as_deref(), dat_dir.as_deref(), keys),
         cli::Command::Hash { text } => commands::hash(text),
         cli::Command::Version => commands::version(),
         cli::Command::Donate => commands::donate(),

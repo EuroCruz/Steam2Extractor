@@ -323,6 +323,26 @@ fn extract_entry(stream: &mut SidStream, row: &SimRow, key: &[u8; 16]) -> Result
     Ok(out)
 }
 
+pub fn verify(data: &[u8]) -> Result<String, String> {
+    let sim = SimFile::parse(data)?;
+    Ok(format!("{} entries", sim.rows.len()))
+}
+
+pub fn list_entries(data: &[u8]) -> Result<Vec<crate::Entry>, String> {
+    let sim = SimFile::parse(data)?;
+    sim.rows
+        .iter()
+        .map(|row| {
+            let path = sim.row_path(row)?;
+            Ok(crate::Entry {
+                name: path.to_string_lossy().into_owned(),
+                size: row.file_size,
+                detail: format!("depot {} disk {}", row.depot, row.disk_no),
+            })
+        })
+        .collect()
+}
+
 pub fn run(args: &SidArgs) -> Result<(), String> {
     let sim_paths: Vec<PathBuf> = args.sim_files.iter().map(PathBuf::from).collect();
     let sim_data = fs::read(&sim_paths[0]).map_err(|e| e.to_string())?;

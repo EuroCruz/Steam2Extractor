@@ -5,6 +5,7 @@ pub mod database;
 pub mod depot;
 pub mod dictbin;
 pub mod filter;
+pub mod inspect;
 pub mod keys;
 pub mod keysfile;
 pub mod keysource;
@@ -14,3 +15,9 @@ pub mod sim;
 pub mod source;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub struct Entry {
+    pub name: String,
+    pub size: u64,
+    pub detail: String,
+}

@@ -7,6 +7,9 @@ TARGETS=(x86_64-unknown-linux-gnu i686-unknown-linux-gnu x86_64-pc-windows-gnu i
 rm -rf dist
 mkdir -p dist
 
+cargo build --release --bin steam2extract_f
+HASHER="target/release/steam2extract_f"
+
 for triple in "${TARGETS[@]}"; do
   cargo build --release --target "$triple" --features steam2-cli/debug-tools --bin steam2extract_d
   cargo build --release --target "$triple" --bin steam2extract_f
@@ -24,13 +27,15 @@ for triple in "${TARGETS[@]}"; do
   cp LICENSE "$out/LICENSE"
 
   {
-    echo "Steam2ExtractV2 build log"
+    echo "Steam2Extract build log"
     echo "target: $triple"
     echo "date:   $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
     echo
     echo "files:"
     find "$out" -type f -not -name "build.log" | sort | while read -r f; do
-      printf "  %-40s %10d bytes\n" "${f#"$out"/}" "$(stat -c%s "$f")"
+      rel="${f#"$out"/}"
+      phash=$("$HASHER" hash "$rel")
+      printf "  %-40s %10d bytes  pandemic=%s\n" "$rel" "$(stat -c%s "$f")" "$phash"
     done
   } > "$out/build.log"
 done
